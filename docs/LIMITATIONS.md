@@ -34,6 +34,8 @@ Honest list for 0.1.0. If one of these blocks you, an issue or PR is welcome.
 - `drop_mid_result` closes the session only if the result has more than `after_rows` rows.
 - `CancelRequest` is relayed to the upstream; it is not matched by rules.
 - Only protocol 3.0 startup is accepted.
+- Per session, at most 4096 injected responses may wait for the server (more closes the session), and at most
+  65,536 prepared-statement / portal names are tracked; `Execute`s of untracked names cannot be faulted.
 
 ## WebAssembly
 

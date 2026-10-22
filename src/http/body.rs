@@ -90,7 +90,14 @@ pub fn throttle(mut inner: ProxyBody, bytes_per_second: u64) -> ProxyBody {
     let (tx, rx) = mpsc::channel(1);
     let chunk = usize::try_from((bytes_per_second / 20).max(1)).unwrap_or(usize::MAX);
     tokio::spawn(async move {
-        while let Some(frame) = inner.frame().await {
+        loop {
+            // Stop as soon as the client is gone, even if the upstream body is
+            // stalled; dropping `inner` releases the upstream connection.
+            let frame = tokio::select! {
+                f = inner.frame() => f,
+                _ = tx.closed() => return,
+            };
+            let Some(frame) = frame else { return };
             let frame = match frame {
                 Ok(f) => f,
                 Err(e) => {
@@ -120,4 +127,51 @@ pub fn throttle(mut inner: ProxyBody, bytes_per_second: u64) -> ProxyBody {
         }
     });
     ChannelBody { rx }.boxed()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A body that never produces a frame and records when it is dropped.
+    struct Stalled(Arc<AtomicBool>);
+    impl Drop for Stalled {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    impl Body for Stalled {
+        type Data = Bytes;
+        type Error = BoxError;
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+            Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn throttle_releases_a_stalled_upstream_when_the_client_goes_away() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let body = throttle(Stalled(Arc::clone(&dropped)).boxed(), 1000);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!dropped.load(Ordering::SeqCst));
+        drop(body); // client disconnects
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "upstream body must be dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn throttle_preserves_every_byte() {
+        let data = Bytes::from(vec![9u8; 10_000]);
+        let body = throttle(full(data.clone()), 1_000_000);
+        let out = body.collect().await.expect("collect").to_bytes();
+        assert_eq!(out, data);
+    }
 }

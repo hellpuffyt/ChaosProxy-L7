@@ -168,7 +168,7 @@ allowlisted headers. Example: [`examples/wasm/path_contains_beta.wat`](examples/
 ## Testing
 
 ```sh
-cargo test --all-features                     # 70 tests; 7 live-PostgreSQL tests are reported as ignored
+cargo test --all-features                     # 77 tests; the 7 live-PostgreSQL tests are reported as ignored
 CHAOSPROXY_PG_BIN=/usr/lib/postgresql/16/bin cargo test --test pg_live --test pg_live_logs -- --ignored
 cargo test --no-default-features              # without wasmtime
 ```

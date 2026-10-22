@@ -30,6 +30,21 @@ use crate::config::{Mode, PgFault};
 use crate::redact;
 use crate::rules::PgPhase;
 
+/// Injected responses that may wait for the server at once. A client that
+/// pipelines more faulted statements than this behind a slow server has its
+/// session closed instead of growing memory without bound.
+pub const MAX_PENDING_SPLICES: usize = 4096;
+
+/// Prepared statements / portals tracked per session for `Execute` matching.
+/// Beyond this, new names are not tracked (their `Execute`s cannot be faulted).
+pub const MAX_TRACKED_NAMES: usize = 65_536;
+
+fn track(map: &mut HashMap<String, String>, name: &str, value: &str) {
+    if map.len() < MAX_TRACKED_NAMES || map.contains_key(name) {
+        map.insert(name.to_owned(), value.to_owned());
+    }
+}
+
 /// Messages from the client half to the server half.
 #[derive(Debug)]
 enum Splice {
@@ -284,12 +299,12 @@ async fn client_to_server(
             }
             b'P' => {
                 if let Ok((name, sql)) = codec::parse_message(&frame.payload) {
-                    statements.insert(name.to_owned(), sql.to_owned());
+                    track(&mut statements, name, sql);
                 }
             }
             b'B' => {
                 if let Ok((portal, stmt)) = codec::bind_message(&frame.payload) {
-                    portals.insert(portal.to_owned(), stmt.to_owned());
+                    track(&mut portals, portal, stmt);
                 }
             }
             b'E' => {
@@ -417,10 +432,22 @@ impl Relay {
                 if self.rfq_seen >= after {
                     write_standalone(client, &bytes, self.status).await?;
                 } else {
+                    if self.standalone.len() >= MAX_PENDING_SPLICES {
+                        return Err(End::Error(format!(
+                            "more than {MAX_PENDING_SPLICES} injected responses waiting for the server; closing session"
+                        )));
+                    }
                     self.standalone.push_back((after, bytes));
                 }
             }
-            Splice::BeforeRfq { idx, bytes } => self.before_rfq.entry(idx).or_default().push(bytes),
+            Splice::BeforeRfq { idx, bytes } => {
+                if self.before_rfq.len() >= MAX_PENDING_SPLICES {
+                    return Err(End::Error(format!(
+                        "more than {MAX_PENDING_SPLICES} injected responses waiting for the server; closing session"
+                    )));
+                }
+                self.before_rfq.entry(idx).or_default().push(bytes)
+            }
             Splice::DropAfter { idx, rows } => self.drop_at = Some((idx, rows, 0)),
         }
         Ok(())
@@ -480,3 +507,6 @@ async fn write_standalone<W: AsyncWrite + Unpin>(
     buf.extend_from_slice(&codec::ready_for_query(status));
     write(w, &buf).await
 }
+
+#[cfg(test)]
+mod tests;
