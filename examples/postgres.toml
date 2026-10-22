@@ -1,0 +1,52 @@
+# ChaosProxy-L7 PostgreSQL demo. Point your app at 127.0.0.1:6543 instead of
+# 127.0.0.1:5432 (sslmode=disable or prefer: the proxy declines TLS).
+#
+#   cargo run -- run --config examples/postgres.toml --pretty
+#   psql "host=127.0.0.1 port=6543 user=postgres sslmode=disable"
+
+seed = 7
+upstream_allowlist = ["127.0.0.1:5432"]
+
+[postgres]
+listen = "127.0.0.1:6543"
+upstream = "127.0.0.1:5432"
+log_query_text = false   # SQL text can contain literals; keep it out of logs
+
+# 20% of INSERTs into orders fail with a serialization failure (retryable).
+[[postgres.rules]]
+id = "serialization-failure"
+percentage = 20.0
+[postgres.rules.match]
+query_regex = '(?i)^\s*insert\s+into\s+orders'
+[postgres.rules.fault]
+kind = "error"
+sqlstate = "40001"
+message = "could not serialize access due to concurrent update (injected)"
+
+# Reports are slow.
+[[postgres.rules]]
+id = "slow-reports"
+[postgres.rules.match]
+query_regex = '(?i)from\s+report_'
+[postgres.rules.fault]
+kind = "delay"
+delay = "2s"
+
+# Large exports lose the connection after 100 rows.
+[[postgres.rules]]
+id = "export-drop"
+[postgres.rules.match]
+query_regex = '(?i)/\*\s*export\s*\*/'
+[postgres.rules.fault]
+kind = "drop_mid_result"
+after_rows = 100
+
+# The "batch" user cannot connect at all.
+[[postgres.rules]]
+id = "batch-refused"
+[postgres.rules.match]
+user = "batch"
+[postgres.rules.fault]
+kind = "reject_startup"
+sqlstate = "53300"
+message = "sorry, too many clients already (injected)"

@@ -1,0 +1,68 @@
+# ChaosProxy-L7 demo configuration.
+#
+#   terminal 1:  cargo run --example echo_upstream
+#   terminal 2:  cargo run -- run --config examples/chaos.toml --pretty
+#   terminal 3:  curl -i http://127.0.0.1:18080/api/users
+#
+# Never point this at production traffic.
+
+mode = "inject"          # or "observe" (log decisions, change nothing); --dry-run forces observe
+seed = 42                # same seed + same request order = same faults
+upstream_allowlist = ["127.0.0.1:19000"]
+max_concurrency = 256
+
+[http]
+listen = "127.0.0.1:18080"
+upstream = "http://127.0.0.1:19000"
+request_timeout = "30s"
+
+# Half of /api requests get 200-300 ms of extra latency.
+[[http.rules]]
+id = "slow-api"
+percentage = 50.0
+[http.rules.match]
+path_prefix = "/api"
+[http.rules.fault]
+kind = "latency"
+delay = "200ms"
+jitter = "100ms"
+
+# 30% of POST /checkout fail with 503 without reaching the upstream.
+[[http.rules]]
+id = "flaky-checkout"
+percentage = 30.0
+[http.rules.match]
+path_prefix = "/checkout"
+methods = ["POST"]
+[http.rules.fault]
+kind = "error"
+status = 503
+body = "injected outage\n"
+
+# Only requests tagged by the client: download at 50 kB/s.
+[[http.rules]]
+id = "slow-download"
+[http.rules.match]
+path_prefix = "/big"
+[http.rules.match.headers]
+x-chaos = "slow"
+[http.rules.fault]
+kind = "throttle"
+bytes_per_second = 50000
+
+# A WebAssembly module decides: any request mentioning "beta" is reset.
+[[http.rules]]
+id = "beta-reset"
+[http.rules.match]
+wasm = "beta"
+[http.rules.fault]
+kind = "reset"
+
+[wasm]
+fuel = 1000000
+max_memory_bytes = 1048576
+timeout = "50ms"
+headers = ["x-tenant"]
+
+[wasm.modules]
+beta = "wasm/path_contains_beta.wat"
