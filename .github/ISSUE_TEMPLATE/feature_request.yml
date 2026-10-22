@@ -1,0 +1,19 @@
+name: Feature request
+description: A new fault, protocol message, matcher or safety rail.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What failure do you want to reproduce?
+      description: Describe the real-world incident or behaviour you are trying to test.
+    validations: { required: true }
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed config / behaviour
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety considerations
+      description: Could this fault be dangerous if misconfigured? How should it be bounded?
