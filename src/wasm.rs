@@ -143,7 +143,7 @@ impl WasmMatchers {
             .instantiate_pre(&module)
             .map_err(|e| err(format!("cannot prepare instance: {e:#}")))?;
         // Trial run: exports, types, ABI version, memory limit.
-        let mut store = self.store().map_err(&err)?;
+        let mut store = self.store().map_err(err)?;
         let instance = pre.instantiate(&mut store).map_err(|e| {
             err(format!(
                 "instantiation failed (initial memory above max_memory_bytes?): {e:#}"
