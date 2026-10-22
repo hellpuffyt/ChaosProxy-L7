@@ -22,7 +22,7 @@ use hyper_util::server::graceful::GracefulShutdown;
 use socket2::SockRef;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore, oneshot, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::config::{HttpConfig, Mode, http_upstream_authority};
 use crate::rules::{ExternalMatcher, HttpRules};
@@ -38,7 +38,8 @@ pub struct RunningHttp {
 
 impl RunningHttp {
     /// Stops accepting, lets in-flight requests finish for up to
-    /// `shutdown_grace`, then returns.
+    /// `shutdown_grace`, then aborts every connection still open (dropping
+    /// its upstream request) and returns.
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(true);
         let _ = self.task.await;
@@ -98,26 +99,34 @@ async fn accept_loop(
     mut stop: watch::Receiver<bool>,
 ) {
     let graceful = GracefulShutdown::new();
+    // Connection tasks are owned here so that whatever is still open when the
+    // grace period runs out can be aborted (and its upstream request dropped)
+    // before `shutdown()` returns.
+    let mut conns = JoinSet::new();
     loop {
         tokio::select! {
             _ = stop.changed() => break,
             accepted = listener.accept() => {
                 match accepted {
-                    Ok((stream, peer)) => serve_connection(stream, peer, Arc::clone(&state), &graceful),
+                    Ok((stream, peer)) => serve_connection(stream, peer, Arc::clone(&state), &graceful, &mut conns),
                     Err(e) => {
                         tracing::warn!(target: "chaosproxy", error = %e, "accept failed");
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
                 }
             }
+            Some(_) = conns.join_next(), if !conns.is_empty() => {}
         }
     }
     drop(listener);
     let grace = state.cfg.shutdown_grace;
     tokio::select! {
         _ = graceful.shutdown() => tracing::info!(target: "chaosproxy", "http listener drained"),
-        _ = tokio::time::sleep(grace) => tracing::warn!(target: "chaosproxy", "shutdown_grace elapsed; dropping remaining connections"),
+        _ = tokio::time::sleep(grace) => tracing::warn!(target: "chaosproxy", open = conns.len(),
+            "shutdown_grace elapsed; dropping remaining connections"),
     }
+    conns.abort_all();
+    while conns.join_next().await.is_some() {}
 }
 
 fn serve_connection(
@@ -125,6 +134,7 @@ fn serve_connection(
     peer: SocketAddr,
     state: Arc<HttpState>,
     graceful: &GracefulShutdown,
+    conns: &mut JoinSet<()>,
 ) {
     let _ = stream.set_nodelay(true);
     // Keep a second handle to the socket so a `reset` fault can set
@@ -156,7 +166,7 @@ fn serve_connection(
         .serve_connection(TokioIo::new(stream), svc)
         .into_owned();
     let conn = graceful.watch(conn);
-    tokio::spawn(async move {
+    conns.spawn(async move {
         tokio::select! {
             res = conn => {
                 if let Err(e) = res {

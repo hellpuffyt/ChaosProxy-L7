@@ -64,38 +64,74 @@ pub async fn handle(
     ctx: ConnCtx,
     req: Request<Incoming>,
 ) -> Result<Response<ProxyBody>, Infallible> {
-    let started = Instant::now();
     let seq = state.seq.fetch_add(1, Ordering::Relaxed);
-    let request_id = format!("cp-{seq:08x}");
-    let method = req.method().clone();
-    let path_log = redact::path_for_log(req.uri());
-
-    let resp = route(&state, &ctx, req, seq, &request_id).await;
-    let (mut resp, rule, fault, injected) = resp;
+    // Logged when dropped, so requests that never get a response (reset and
+    // hang faults, client disconnects, shutdown) are logged exactly once too.
+    let mut log = AccessLog {
+        request_id: format!("cp-{seq:08x}"),
+        method: req.method().clone(),
+        path: redact::path_for_log(req.uri()),
+        started: Instant::now(),
+        status: None,
+        rule: None,
+        fault: None,
+        injected: false,
+    };
+    let request_id = log.request_id.clone();
+    let mut resp = route(&state, &ctx, req, seq, &request_id, &mut log).await;
     if let Ok(v) = HeaderValue::from_str(&request_id) {
         resp.headers_mut().insert(REQUEST_ID_HEADER, v);
     }
-    tracing::info!(
-        target: "chaosproxy::access",
-        request_id = %request_id,
-        method = %method,
-        path = %path_log,
-        status = resp.status().as_u16(),
-        rule = rule.as_deref().unwrap_or("-"),
-        fault = fault.unwrap_or("-"),
-        injected,
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        "request"
-    );
+    log.status = Some(resp.status().as_u16());
     Ok(resp)
 }
 
-type Routed = (
-    Response<ProxyBody>,
-    Option<String>,
-    Option<&'static str>,
-    bool,
-);
+/// One access-log line per request, written on drop.
+struct AccessLog {
+    request_id: String,
+    method: Method,
+    path: String,
+    started: Instant,
+    /// `None` until a response head exists.
+    status: Option<u16>,
+    rule: Option<String>,
+    fault: Option<&'static str>,
+    injected: bool,
+}
+
+impl Drop for AccessLog {
+    fn drop(&mut self) {
+        let elapsed_ms = self.started.elapsed().as_millis() as u64;
+        let rule = self.rule.as_deref().unwrap_or("-");
+        let fault = self.fault.unwrap_or("-");
+        match self.status {
+            Some(status) => tracing::info!(
+                target: "chaosproxy::access",
+                request_id = %self.request_id,
+                method = %self.method,
+                path = %self.path,
+                status,
+                rule,
+                fault,
+                injected = self.injected,
+                elapsed_ms,
+                "request"
+            ),
+            None => tracing::info!(
+                target: "chaosproxy::access",
+                request_id = %self.request_id,
+                method = %self.method,
+                path = %self.path,
+                aborted = true,
+                rule,
+                fault,
+                injected = self.injected,
+                elapsed_ms,
+                "request"
+            ),
+        }
+    }
+}
 
 async fn route(
     state: &Arc<HttpState>,
@@ -103,28 +139,19 @@ async fn route(
     req: Request<Incoming>,
     seq: u64,
     request_id: &str,
-) -> Routed {
+    log: &mut AccessLog,
+) -> Response<ProxyBody> {
     let Ok(permit) = Arc::clone(&state.limiter).try_acquire_owned() else {
         tracing::warn!(target: "chaosproxy::access", request_id, "max_concurrency reached; shedding request");
-        return (
-            simple(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "chaosproxy: max_concurrency reached\n",
-            ),
-            None,
-            None,
-            false,
+        return simple(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "chaosproxy: max_concurrency reached\n",
         );
     };
     if req.method() == Method::CONNECT || req.headers().contains_key(header::UPGRADE) {
-        return (
-            simple(
-                StatusCode::NOT_IMPLEMENTED,
-                "chaosproxy: CONNECT and protocol upgrades are not supported\n",
-            ),
-            None,
-            None,
-            false,
+        return simple(
+            StatusCode::NOT_IMPLEMENTED,
+            "chaosproxy: CONNECT and protocol upgrades are not supported\n",
         );
     }
 
@@ -139,7 +166,7 @@ async fn route(
     };
     let Some(decision) = decision else {
         let resp = forward(state, ctx, req, request_id, None).await;
-        return (guard_body(resp, vec![Box::new(permit)]), None, None, false);
+        return guard_body(resp, vec![Box::new(permit)]);
     };
 
     let rule_id = decision.rule_id.clone();
@@ -147,14 +174,12 @@ async fn route(
     let inject = state.mode == Mode::Inject;
     tracing::info!(target: "chaosproxy::fault", request_id, rule = %rule_id, fault = kind, injected = inject,
         "fault decision");
+    log.rule = Some(rule_id.clone());
+    log.fault = Some(kind);
+    log.injected = inject;
     if !inject {
         let resp = forward(state, ctx, req, request_id, None).await;
-        return (
-            guard_body(resp, vec![Box::new(permit)]),
-            Some(rule_id),
-            Some(kind),
-            false,
-        );
+        return guard_body(resp, vec![Box::new(permit)]);
     }
 
     let guards: Vec<Box<dyn Any + Send + Sync>> = vec![Box::new(permit), Box::new(decision.guard)];
@@ -189,17 +214,17 @@ async fn route(
     if let Ok(v) = HeaderValue::from_str(&rule_id) {
         resp.headers_mut().insert(FAULT_HEADER, v);
     }
-    (resp, Some(rule_id), Some(kind), true)
+    resp
 }
 
 /// Asks the connection task to reset/close after `wait`, then never answers.
-async fn conn_action(ctx: &ConnCtx, action: ConnAction, wait: Duration) -> Routed {
+async fn conn_action(ctx: &ConnCtx, action: ConnAction, wait: Duration) -> Response<ProxyBody> {
     tokio::time::sleep(wait).await;
     if let Some(tx) = ctx.action.lock().await.take() {
         let _ = tx.send(action);
     }
     // The connection task drops this future when it tears the connection down.
-    std::future::pending::<Routed>().await
+    std::future::pending::<Response<ProxyBody>>().await
 }
 
 fn guard_body(

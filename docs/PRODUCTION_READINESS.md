@@ -117,6 +117,17 @@ Ubuntu, MSRV 1.97, cargo-deny. Action SHAs were checked against their release ta
 | 19 | CI green on Linux, macOS, Windows | GitHub Actions | **not verified** | repo unpublished |
 | 20 | Works on Windows | — | **not verified** | no Windows machine |
 
+## Deep-audit addendum (after 0.1.0)
+
+Two defects found and fixed with regression tests that fail on the previous code
+(`shutdown_aborts_what_outlives_the_grace_period`; the access-log assertion in both
+`mixed_faults_under_512_concurrent_requests_*` tests): HTTP connections outliving `shutdown_grace` were never
+aborted, and requests without a response had no access-log line. New tests: `tests/http_concurrency.rs` (5) and
+`tests/http_malformed.rs` (5); `cargo test --all-features` now reports 87 passed, 7 ignored. Request smuggling
+(CL+TE in both orders, obfuscated/duplicated framing headers), oversized headers and invalid chunked bodies were
+probed through the proxy: hyper refuses or re-frames them and the upstream never receives both framings or a
+smuggled request — no proxy defect found there.
+
 ## External requirements for further verification
 
 - GitHub Actions (publishing the repository) for the Linux/Windows matrix and the CI PostgreSQL job.

@@ -16,8 +16,22 @@ Honest list for 0.1.0. If one of these blocks you, an issue or PR is welcome.
 - `request_timeout` covers the upstream's response **headers** only; slow bodies are not timed out.
 - A `reset` or `hang` fault on an HTTP/2 connection affects every stream on that connection (it is a TCP-level action).
 - Fault determinism assumes requests arrive in the same order. Concurrent clients (or other software polling the
-  port) change sequence numbers and therefore which requests are faulted.
+  port) change sequence numbers and therefore which requests are faulted. Precisely:
+  - **Deterministic:** the decision for sequence number *n* is a pure function of `(seed, n, the request's
+    method/path/headers)`, including jitter. If every request matches the same rules, the *set of faulted
+    sequence numbers* (visible as `x-chaosproxy-request-id`) is identical across runs even when requests race
+    (`tests/http_concurrency.rs::concurrent_decisions_are_a_function_of_seed_and_sequence_number`, 300 racing
+    requests).
+  - **Not deterministic when requests race:** which client request receives which sequence number (it is taken
+    when hyper hands the request to the service), and therefore which request is faulted; with rules that match
+    different paths, even the number of faults per rule varies between runs; whether a rule at its
+    `max_concurrent` cap fires depends on timing; injected delays are exact but wall-clock timings are not.
+  - Requests shed by `max_concurrency` and refused `CONNECT`/`Upgrade` requests still consume a sequence number.
 - `throttle` paces data frames only; it does not slow the response head.
+- Shutdown waits up to `shutdown_grace` for in-flight HTTP requests, then aborts the rest; the binary shuts the
+  HTTP and PostgreSQL listeners down one after the other, so a full stop can take up to twice `shutdown_grace`.
+- There are no metrics counters; per-rule fault counts come from the JSON logs (one `fault decision` line per
+  decision, one `request` line per request).
 - Trailers are forwarded by hyper as frames; they were not specifically tested.
 
 ## PostgreSQL
@@ -52,6 +66,9 @@ Honest list for 0.1.0. If one of these blocks you, an issue or PR is welcome.
 
 ## Not done yet
 
-- No benchmarks; no performance claims.
+- No benchmarks; no performance claims. The concurrency tests (512 simultaneous requests, mixed faults) check
+  correctness and leaks, not throughput. On macOS the kernel caps listen backlogs at 128
+  (`kern.ipc.somaxconn`), so bursts of new connections beyond that can be refused by the OS before the proxy
+  sees them, and a burst of HTTP/1.1 upstream connections can fail with `502`; h2c to the upstream avoids that.
 - No release binaries or container image.
 - No Docker Compose demo (the demo runs with `cargo run`).

@@ -75,13 +75,13 @@ wasm modules: WasmMatchers { modules: ["beta"] }
 
 | Area | What |
 |---|---|
-| HTTP forwarding | HTTP/1.1 and h2c (HTTP/2 prior knowledge) on one listener; HTTP/1.1 or h2c to the upstream; hop-by-hop header stripping (incl. headers named in `Connection`); `X-Forwarded-For/Proto/Host`; `x-request-id`; streaming bodies with backpressure; upstream response timeout (504); unreachable upstream (502); client disconnect cancels the upstream request; slow-header protection; graceful shutdown |
+| HTTP forwarding | HTTP/1.1 and h2c (HTTP/2 prior knowledge) on one listener; HTTP/1.1 or h2c to the upstream; hop-by-hop header stripping (incl. headers named in `Connection`); `X-Forwarded-For/Proto/Host`; `x-request-id`; streaming bodies with backpressure; upstream response timeout (504); unreachable upstream (502); client disconnect cancels the upstream request (also mid-body); slow-header protection; graceful shutdown (in-flight requests get `shutdown_grace`, then are aborted with their upstream requests) |
 | HTTP faults | `latency` (+ uniform jitter), `first_byte_delay`, `throttle` (bytes/s), `reset` (TCP RST via `SO_LINGER=0`), `timeout` (504 after N), `hang` (no answer, close after N), `error` (status + body, upstream not contacted) |
 | Matching | path prefix, path regex, methods, exact header values, optional WebAssembly module; first matching rule wins; percentage roll from `seed` + request sequence number; `max_concurrent` cap per rule |
 | PostgreSQL | v3 wire-protocol proxy: startup, `SSLRequest`/`GSSENCRequest` declined with `N`, `CancelRequest` relayed, auth passthrough (SCRAM tested), simple and extended query protocol; faults `error` (SQLSTATE), `delay`, `drop_mid_result` (after N rows), `reject_startup`; correct response ordering with pipelined batches |
 | WebAssembly | matcher ABI v1 on Wasmtime: no imports (no WASI), fuel limit, wall-clock limit (epoch interruption), memory limit, fresh instance per decision; load errors refuse startup, runtime errors fail closed |
 | Safety | loopback-only unless `allow_non_loopback = true` **and** `--allow-non-loopback`; every upstream must be in `upstream_allowlist`; `mode = "observe"` / `--dry-run`; global `max_concurrency` (excess shed with 503 / SQLSTATE 53300); strict config validation with actionable errors |
-| Logs | JSON lines with request ids and rule ids; never logs bodies, header values, query strings, passwords, or SQL text (unless `log_query_text = true`) |
+| Logs | JSON lines with request ids and rule ids; exactly one access-log line per request, including requests that never get a response (`reset`/`hang` faults, client disconnects, shutdown: `aborted=true`); never logs bodies, header values, query strings, passwords, or SQL text (unless `log_query_text = true`) |
 
 ### Experimental
 
@@ -168,7 +168,7 @@ allowlisted headers. Example: [`examples/wasm/path_contains_beta.wat`](examples/
 ## Testing
 
 ```sh
-cargo test --all-features                     # 77 tests; the 7 live-PostgreSQL tests are reported as ignored
+cargo test --all-features                     # 87 tests; the 7 live-PostgreSQL tests are reported as ignored
 CHAOSPROXY_PG_BIN=/usr/lib/postgresql/16/bin cargo test --test pg_live --test pg_live_logs -- --ignored
 cargo test --no-default-features              # without wasmtime
 ```
@@ -199,7 +199,7 @@ parse/serialize hop and is meant for test environments.
 | `502 chaosproxy: upstream unavailable` | the upstream is not listening; check `upstream` |
 | `503 chaosproxy: max_concurrency reached` | raise `max_concurrency` or slow your load |
 | psql: `SSL is not supported` / hangs on TLS | use `sslmode=disable` or `prefer` |
-| Fault pattern differs between runs | other clients are hitting the port (each request consumes a sequence number), or requests run concurrently |
+| Fault pattern differs between runs | other clients are hitting the port (each request consumes a sequence number), or requests run concurrently (see "Determinism" in [docs/LIMITATIONS.md](docs/LIMITATIONS.md)) |
 
 ## Limitations and roadmap
 
