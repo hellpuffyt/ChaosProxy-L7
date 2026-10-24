@@ -1,13 +1,14 @@
 # Production-readiness report — ChaosProxy-L7 0.1.0
 
-**Classification: Partially Verified.** Everything below was run on one developer machine. GitHub Actions
-(Linux/macOS/Windows test matrix, CI PostgreSQL job, MSRV job) has **not run yet**, Windows has not been
-exercised at all, and the tool has had no external security review. "Production-ready" would also be the wrong
+**Classification: Partially Verified.** Everything below was run on one developer machine, plus GitHub Actions
+(Linux/macOS/Windows test matrix, CI PostgreSQL job, MSRV job, cargo-deny), which is green on `26f5519`. Nobody
+has run the proxy on Windows by hand, and the tool has had no external security review. "Production-ready" would also be the wrong
 goal: this is a test-environment tool that must never front production traffic.
 
-- Tested code commit: `ed5b9eea0367dfc4b18f44e5639f6b06507e7ba9` (later commits change documentation only;
-  check with `git diff --stat ed5b9ee HEAD`).
-- Verification date: 2026-10-22.
+- Tested code commit: `ed5b9eea0367dfc4b18f44e5639f6b06507e7ba9` (2026-10-22). Later commits changed code
+  and tests (see the deep-audit addendum); `26f551983bb77c3d10a14eadee384070a0a2d545` was re-verified from a
+  fresh clone on 2026-10-24 (row in the clean-clone table below).
+- Verification date: 2026-10-22; re-verification 2026-10-24.
 - Machine: Apple M5, 10 cores, 16 GB, macOS 27; rustc 1.98.0 stable; PostgreSQL 17.11 (Homebrew).
   The machine was heavily loaded during testing (load average 18–24 from other builds); timing-based tests use
   lower bounds only, so load cannot make them pass spuriously.
@@ -43,6 +44,7 @@ directory with a fresh `CARGO_TARGET_DIR`:
 |---|---|
 | `37815ef` | `cargo test --all-features` exit 0 (70 passed, 0 failed, 7 ignored); `check` exit 0; demo reproduced the README output exactly; working tree clean after |
 | `ed5b9ee` | `cargo test --all-features` exit 0 (77 passed, 0 failed, 7 ignored); live PostgreSQL tests 7/7; `check` exit 0; demo output identical to README; working tree clean after |
+| `26f5519` | fresh clone of the published repository: `cargo test --all-features --locked` exit 0 (87 passed, 0 failed, 7 ignored); `--no-default-features` 79/0/7; live PostgreSQL tests 7/7 (PostgreSQL 17.11); fmt, clippy (rustc 1.98.0 and 1.99.1, both feature sets), doc, MSRV 1.97, `cargo deny check`, `cargo audit` all exit 0; demo output identical to README on two runs; every HTTP fault, 504/502, h2c and the four PostgreSQL faults (via `psql`) checked black-box |
 
 ## Commands executed (on `ed5b9ee`) and outcomes
 
@@ -66,7 +68,7 @@ directory with a fresh `CARGO_TARGET_DIR`:
 
 `.github/workflows/ci.yml`: lint (fmt, clippy ×2, doc), test matrix (ubuntu/macos/windows), live PostgreSQL on
 Ubuntu, MSRV 1.97, cargo-deny. Action SHAs were checked against their release tags with `gh api`.
-**Status: not yet run** (repository unpublished).
+**Status: green** on `main` at `26f5519` (all seven jobs, including `test (windows-latest)` and `postgres`).
 
 ## Bugs found and fixed during development
 
@@ -114,8 +116,8 @@ Ubuntu, MSRV 1.97, cargo-deny. Action SHAs were checked against their release ta
 | 16 | Malformed PostgreSQL input closes the connection without panicking | `pg_offline::malformed_startup_closes_the_connection`, codec property tests | pass | |
 | 17 | Wasm: bad modules refused at load; trap/fuel/time/memory/bad return fail closed | `tests/wasm_sandbox.rs` (8 tests) | pass | |
 | 18 | Clean clone follows README and reproduces documented output | manual runs on `37815ef` and `ed5b9ee` | pass | table above |
-| 19 | CI green on Linux, macOS, Windows | GitHub Actions | **not verified** | repo unpublished |
-| 20 | Works on Windows | — | **not verified** | no Windows machine |
+| 19 | CI green on Linux, macOS, Windows | GitHub Actions | pass | CI run on `26f5519` |
+| 20 | Works on Windows (proxy run by hand) | — | **not verified** | no Windows machine; CI runs the test suite only |
 
 ## Deep-audit addendum (after 0.1.0)
 
@@ -130,7 +132,6 @@ smuggled request — no proxy defect found there.
 
 ## External requirements for further verification
 
-- GitHub Actions (publishing the repository) for the Linux/Windows matrix and the CI PostgreSQL job.
 - A Windows machine for manual testing.
-- Clients beyond `curl`, hyper and `tokio-postgres` (for example libpq/psql, JDBC, Go pgx) to confirm PostgreSQL
+- Clients beyond `curl`, hyper, `tokio-postgres` and `psql` (for example JDBC, Go pgx) to confirm PostgreSQL
   protocol compatibility more broadly.
