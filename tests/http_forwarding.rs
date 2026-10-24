@@ -97,7 +97,14 @@ async fn unreachable_upstream_returns_502() {
         .unwrap()
         .local_addr()
         .unwrap();
-    let p = proxy(http_config(dead, "", "")).await;
+    // Windows retries a refused SYN for about two seconds before reporting it,
+    // which would race the helper's 2s request_timeout and yield a 504.
+    let p = proxy(http_config(dead, "", "").tap(|c| {
+        if let Some(h) = c.http.as_mut() {
+            h.request_timeout = Duration::from_secs(10);
+        }
+    }))
+    .await;
     let (status, _, _) = get(&client(), p.local_addr, "/").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     p.shutdown().await;
