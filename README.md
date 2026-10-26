@@ -2,29 +2,40 @@
 
 ![CI](https://github.com/hellpuffyt/ChaosProxy-L7/actions/workflows/ci.yml/badge.svg)
 
-**A loopback-by-default fault-injection proxy that makes your HTTP services and PostgreSQL database misbehave on purpose — reproducibly — so you can test how your application copes.**
+**A loopback-by-default fault-injection proxy that makes your HTTP services and PostgreSQL database misbehave on purpose, reproducibly, so you can test how your application copes.**
 
-> **Status: experimental, 0.1.0 — not production-ready.** It is a testing tool. **Never put it in front of production traffic.** No TLS on either side.
+> **Status: experimental, 0.1.0, not production-ready.** It is a testing tool. **Never put it in front of production traffic.** No TLS on either side.
+
+[Case study ↗](https://hellpuff.dev/work/chaosproxy-l7)
+
+## Demo
+
+<img src="docs/screenshots/http-faults-seeded-run.png" width="100%" alt="Terminal: chaosproxy check lists four HTTP rules; with the proxy and a toy upstream running, five GET requests return 200 with the third and fifth delayed by about 300 and 240 ms, a POST to /checkout returns 503 with x-chaosproxy-fault flaky-checkout, and a request to /beta/checkout is reset (curl exit 56)">
+
+Real terminal capture (macOS, Apple M5, release build, `examples/chaos.toml` with `seed = 42`). The same commands
+as text:
 
 ```console
-$ cargo run --example echo_upstream &                       # a toy upstream on 127.0.0.1:19000
-$ cargo run --release -- run --config examples/chaos.toml & # the proxy on 127.0.0.1:18080
+$ cargo run --example echo_upstream &                        # toy upstream on 127.0.0.1:19000
+$ cargo run --release -- run --config examples/chaos.toml &  # proxy on 127.0.0.1:18080
 $ for i in 1 2 3 4 5; do curl -s -o /dev/null -w "%{http_code} %{time_total}s\n" http://127.0.0.1:18080/api/users; done
-200 0.002000s
-200 0.000907s
-200 0.302962s
-200 0.000790s
-200 0.240848s
+200 0.002295s
+200 0.000945s
+200 0.301152s
+200 0.000912s
+200 0.241239s
 $ curl -si -X POST http://127.0.0.1:18080/checkout -d '{}' | grep -iE '^HTTP|x-chaosproxy-fault'
 HTTP/1.1 503 Service Unavailable
 x-chaosproxy-fault: flaky-checkout
 $ curl -s http://127.0.0.1:18080/beta/checkout; echo "curl exit $?"
-curl exit 56                                                # connection reset by a WebAssembly-selected rule
+curl exit 56
 ```
 
-That output is real (Apple M5, macOS, release build). Run it twice with the same `seed` and the same request
-order and you get **the same faults in the same places**: on a second run the same two requests were delayed
-(by ~300 ms and ~240 ms again) and the same checkout request failed.
+The third and fifth requests hit the `slow-api` latency rule, the checkout request hits `flaky-checkout`, and the
+`/beta/` request is reset by a rule whose WebAssembly matcher selected it (curl exit 56 is "connection reset").
+Run it again with the same `seed` and the same request order and the same requests are delayed by about the same
+amounts and the same checkout request fails: the audit run that made this capture and two earlier runs produced
+the identical pattern.
 
 ## Why
 
@@ -39,7 +50,7 @@ retry loops) and anyone who wants a reproducible "the database just dropped my c
 mature, excellent choice for byte-level faults; it cannot answer an HTTP request with a 503 or fail one specific
 SQL statement with SQLSTATE `40001`. Service-mesh fault injection (Envoy/Istio) needs a mesh. ChaosProxy-L7 is a
 single local binary that understands HTTP and the PostgreSQL wire protocol, so faults can target a route, a
-header, or a query — and it refuses to listen beyond loopback unless you opt in twice.
+header, or a query, and it refuses to listen beyond loopback unless you opt in twice.
 
 ## Quick start
 
@@ -128,7 +139,7 @@ A config is one TOML file; unknown keys are rejected. Full examples: [`examples/
 | `[http] listen` / `upstream` | required | e.g. `"127.0.0.1:18080"` / `"http://127.0.0.1:19000"` (no path, no https) |
 | `[http] upstream_http2` | `false` | h2c prior knowledge to the upstream |
 | `[http] request_timeout` / `header_read_timeout` / `shutdown_grace` | `30s` / `10s` / `10s` | |
-| `[[http.rules]] id, percentage, max_concurrent` | —, `100`, `0` (unlimited) | |
+| `[[http.rules]] id, percentage, max_concurrent` | required, `100`, `0` (unlimited) | `id` names the rule in logs and in `x-chaosproxy-fault` |
 | `[http.rules.match]` | match all | `path_prefix`, `path_regex`, `methods`, `headers` (table), `wasm` |
 | `[http.rules.fault] kind` | required | `latency{delay,jitter}`, `first_byte_delay{delay}`, `throttle{bytes_per_second}`, `reset`, `timeout{after}`, `hang{max=60s}`, `error{status,body}` |
 | `[postgres] listen` / `upstream` | required | `upstream` is `host:port` |
@@ -156,7 +167,7 @@ psql "host=127.0.0.1 port=6543 user=postgres sslmode=disable"
 
 An injected `error` on a simple query or an extended-protocol `Execute` is never sent to the server, and the
 session stays usable afterwards. Inside an explicit transaction the **server's** transaction is not aborted by
-an injected error — see [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+an injected error; see [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 ### WebAssembly matchers
 
@@ -170,7 +181,7 @@ allowlisted headers. Example: [`examples/wasm/path_contains_beta.wat`](examples/
 ```sh
 cargo test --all-features                     # 87 tests; the 7 live-PostgreSQL tests are reported as ignored
 CHAOSPROXY_PG_BIN=/usr/lib/postgresql/16/bin cargo test --test pg_live --test pg_live_logs -- --ignored
-cargo test --no-default-features              # without wasmtime
+cargo test --no-default-features              # without wasmtime (79 tests + the same 7 ignored)
 ```
 
 The live PostgreSQL tests create a throwaway cluster (SCRAM auth, loopback TCP only) per test and stop it
@@ -184,7 +195,7 @@ parse/serialize hop and is meant for test environments.
 ## Security model
 
 - **Threat model:** a developer or CI job running the proxy locally against its own services. The proxy is not
-  hardened for untrusted networks and does not authenticate clients — that is why it binds to loopback by default.
+  hardened for untrusted networks and does not authenticate clients, which is why it binds to loopback by default.
 - Two independent opt-ins are needed to listen elsewhere; upstreams outside the allowlist are refused at startup.
 - WebAssembly modules are treated as untrusted code: no host functions, bounded CPU/time/memory, fresh instance per call.
 - Logs carry metadata only. See [SECURITY.md](SECURITY.md) for reporting.
